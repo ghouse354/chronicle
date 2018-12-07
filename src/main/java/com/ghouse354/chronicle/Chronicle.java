@@ -2,6 +2,7 @@ package com.ghouse354.chronicle;
 
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -22,27 +23,26 @@ public class Chronicle {
 
     private boolean d_isInitialized = false;
 
-    private List<NamespaceEntity> d_namespace;
+    private List<NamespaceEntity> d_registeredEntities;
     private List<Topic> d_topics;
     private Map<String, Optional<String>> d_publishedData;
 
-    private FileWriter d_fileWriter;
+    private Writer d_writer;
 
     private Function<Double, String> d_doubleStringFunction = (d) -> String.format("%.5g", d);
 
-    private Chronicle(String path) {
+    private Chronicle(Writer writer) {
         d_isInitialized = false;
 
-        d_namespace = new ArrayList<>();
+        d_registeredEntities = new ArrayList<>();
         d_topics = new ArrayList<>();
         d_publishedData = new HashMap<>();
 
-        try {
-            d_fileWriter = new FileWriter(path);
-        }
-        catch (IOException e) {
-            e.printStackTrace();
-        }
+        d_writer = writer;
+    }
+
+    private Chronicle(String path) throws IOException {
+        this(new FileWriter(path));
     }
 
     /**
@@ -52,18 +52,30 @@ public class Chronicle {
      * @throws RuntimeException if already initialized
      */
     public static Chronicle initialize(String path) {
+        try {
+            FileWriter fw = new FileWriter(path);
+            return initialize(fw);
+        }
+        catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    public static Chronicle initialize(Writer writer) {
         if (s_instance.isPresent()) {
             throw new RuntimeException("Chronicle already initialized");
         }
 
-        Chronicle chronicle = new Chronicle(path);
+        Chronicle chronicle = new Chronicle(writer);
         s_instance = Optional.of(chronicle);
 
         return chronicle;
     }
 
     public static void createTopicString(String name, String unit, Supplier<String> supplier, String... attrs) {
-        if (s_instance.get().d_isInitialized) {
+        Chronicle instance = s_instance.get();
+        if (instance.isInitialized()) {
             throw new RuntimeException("Chronicle is already locked");
         }
 
@@ -72,8 +84,8 @@ public class Chronicle {
         }
 
         QueriedTopic topic = new QueriedTopic(name, unit, supplier, attrs);
-        s_instance.get().d_namespace.add(topic);
-        s_instance.get().d_topics.add(topic);
+        instance.getRegisteredEntities().add(topic);
+        instance.getTopics().add(topic);
     }
 
     public static void createTopic(String name, String unit, Supplier<Double> supplier, String... attrs) {
@@ -82,17 +94,18 @@ public class Chronicle {
 
     public static void createTopicSubscriber(String name, String unit, DataInferenceMode mode, String... attrs) {
         Chronicle instance = s_instance.get();
-        if (instance.d_isInitialized) {
+        if (instance.isInitialized()) {
             throw new RuntimeException("Chronicle is already locked");
         }
         if (isRegistered(name)) {
             throw new RuntimeException("Topic '" + name + "' is already registered");
         }
 
-        instance.d_publishedData.put(name, Optional.empty());
+        instance.getPublishedData().put(name, Optional.empty());
         SubscribedTopic topic = new SubscribedTopic(name, unit, mode, attrs);
-        instance.d_namespace.add(topic);
-        instance.d_topics.add(topic);
+        instance.getRegisteredEntities().add(topic);
+        instance.getTopics().add(topic);
+
     }
 
     public static void createValue(String name, String value) {
@@ -104,7 +117,7 @@ public class Chronicle {
             throw new RuntimeException("Topic '" + name + "' is already registered");
         }
 
-        instance.d_namespace.add(new Value(name, value));
+        instance.getRegisteredEntities().add(new Value(name, value));
     }
 
     public static void publish(String name, String value) {
@@ -119,28 +132,56 @@ public class Chronicle {
         publish(name, s_instance.get().d_doubleStringFunction.apply(value));
     }
 
-    public void finalizeInitialization() {
-        if (d_isInitialized) {
+    public static void finalizeInitialization() {
+        Chronicle instance = s_instance.get();
+        if (instance.isInitialized()) {
             throw new RuntimeException("Chronicle already initialized");
         }
-        d_isInitialized = true;
 
-        String jsonHeader = generateJsonHeader();
+        instance.setInitialized(true);
 
-        // Write the CSV Header
+        String jsonHeader = instance.generateJsonHeader();
+
         StringJoiner joiner = new StringJoiner(",");
-        d_topics.stream().map(Topic::getName).forEach((n) -> joiner.add(n));
-        String header = joiner.toString();
+        instance.d_topics.stream()
+            .map(Topic::getName)
+            .forEach((n) -> joiner.add(n));
+            String header = joiner.toString();
 
-        writeLine(jsonHeader);
-        writeLine(header);
+        instance.writeLine(jsonHeader);
+        instance.writeLine(header);
 
         try {
-            d_fileWriter.flush();
+            instance.getWriter().flush();
         }
         catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    // ===== Instance Methods =====
+    public boolean isInitialized() {
+        return d_isInitialized;
+    }
+
+    public void setInitialized(boolean val) {
+        d_isInitialized = val;
+    }
+
+    public List<NamespaceEntity> getRegisteredEntities() {
+        return d_registeredEntities;
+    }
+
+    public List<Topic> getTopics() {
+        return d_topics;
+    }
+
+    public Map<String, Optional<String>> getPublishedData() {
+        return d_publishedData;
+    }
+
+    private Writer getWriter() {
+        return d_writer;
     }
 
     public void updateTopics() {
@@ -195,7 +236,7 @@ public class Chronicle {
         jsonRoot.put("topics", jsonTopics);
 
         JSONArray jsonValues = new JSONArray();
-        d_namespace.stream().filter((o) -> o instanceof Value).map((v) -> (Value) v).forEach((v) -> {
+        d_registeredEntities.stream().filter((o) -> o instanceof Value).map((v) -> (Value) v).forEach((v) -> {
             JSONObject value = new JSONObject();
             value.put("name", v.getName());
             value.put("value", v.getValue());
@@ -208,7 +249,7 @@ public class Chronicle {
     }
 
     private static boolean isRegistered(String name) {
-        return s_instance.get().d_namespace.stream().anyMatch((o) -> o.getName().equals(name));
+        return s_instance.get().d_registeredEntities.stream().anyMatch((o) -> o.getName().equals(name));
     }
 
     private static String escapeCommas(String in) {
@@ -228,8 +269,8 @@ public class Chronicle {
 
     private void writeLine(String line) {
         try {
-            d_fileWriter.write(line + System.lineSeparator());
-            d_fileWriter.flush();
+            d_writer.write(line + System.lineSeparator());
+            d_writer.flush();
         }
         catch (IOException e) {
             e.printStackTrace();
