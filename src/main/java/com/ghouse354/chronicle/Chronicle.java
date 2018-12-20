@@ -6,55 +6,57 @@ import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.StringJoiner;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Supplier;
+
+import com.opencsv.CSVWriter;
 
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 
 public class Chronicle {
-    public static final String DEFAULT_DATA = Double.toString(-1.0);
+    // === CLASS LEVEL PROPERTIES ===
+    private static Map<String, Chronicle> s_instances = new HashMap<>();
 
-    private static Optional<Chronicle> s_instance = Optional.empty();
+    public static final String DEFAULT_DATA = "-1.0";
 
-    private boolean d_isInitialized = false;
+    private static Function<Double, String> s_doubleToString = (d) -> String.format("%.5g", d);
+    private static Function<Long, String> s_longToString = (l) -> Long.toString(l);
 
-    private List<NamespaceEntity> d_registeredEntities;
-    private List<Topic> d_topics;
-    private Map<String, Optional<String>> d_publishedData;
+    // === CLASS LEVEL METHODS ===
+    /**
+     * Create a new Chronicle instance with an identifier and an output writer
+     * @param ident Unique identifier for this Chronicle instance
+     * @param writer Output writer to use for Chronicle output
+     * @return Instance of Chronicle
+     */
+    public static Chronicle create(String ident, Writer writer) {
+        // Check if this identifier already exists
+        if (s_instances.containsKey(ident)) {
+            throw new DuplicateIdentifierException();
+        }
 
-    private Writer d_writer;
+        Chronicle chronicle = new Chronicle(writer);
+        s_instances.put(ident, chronicle);
 
-    private Function<Double, String> d_doubleStringFunction = (d) -> String.format("%.5g", d);
-
-    private Chronicle(Writer writer) {
-        d_isInitialized = false;
-
-        d_registeredEntities = new ArrayList<>();
-        d_topics = new ArrayList<>();
-        d_publishedData = new HashMap<>();
-
-        d_writer = writer;
-    }
-
-    private Chronicle(String path) throws IOException {
-        this(new FileWriter(path));
+        return chronicle;
     }
 
     /**
-     * Initializes Chronicle
-     * @param path path to save log file to
-     * @return instance of Chronicle
-     * @throws RuntimeException if already initialized
+     * Create a new Chronicle instance that writes to a provided file path
+     * @param ident Unique identifier for this Chronicle instance
+     * @param path File name to save output to
+     * @return Instance of Chronicle
      */
-    public static Chronicle initialize(String path) {
+    public static Chronicle create(String ident, String path) {
         try {
             FileWriter fw = new FileWriter(path);
-            return initialize(fw);
+            return create(ident, fw);
         }
         catch (IOException e) {
             e.printStackTrace();
@@ -62,215 +64,268 @@ public class Chronicle {
         }
     }
 
-    public static Chronicle initialize(Writer writer) {
-        if (s_instance.isPresent()) {
-            throw new RuntimeException("Chronicle already initialized");
-        }
-
-        Chronicle chronicle = new Chronicle(writer);
-        s_instance = Optional.of(chronicle);
-
-        return chronicle;
+    /**
+     * Retrieve a registered Chronicle instance
+     * @param ident Identifier
+     * @return Chronicle instance, or null if nothing was registered with that ID
+     */
+    public static Chronicle getInstance(String ident) {
+        return s_instances.get(ident);
     }
 
-    public static void createTopicString(String name, String unit, Supplier<String> supplier, String... attrs) {
-        Chronicle instance = s_instance.get();
-        if (instance.isInitialized()) {
-            throw new RuntimeException("Chronicle is already locked");
+    @SuppressWarnings("unchecked")
+    private static String generateJsonHeader(List<CEntity> entities) {
+        JSONObject jsonRoot = new JSONObject();
+        JSONArray jsonTopics = new JSONArray();
+        JSONArray jsonValues = new JSONArray();
+
+        for (CEntity entity : entities) {
+            if (entity instanceof CTopic) {
+                CTopic t = (CTopic)entity;
+                JSONObject topic = new JSONObject();
+                topic.put("name", t.getName());
+                topic.put("unit", t.getUnit());
+                JSONArray attrs = new JSONArray();
+                Arrays.stream(t.getAttributes())
+                    .forEach((a) -> attrs.add(a));
+                topic.put("attrs", attrs);
+                jsonTopics.add(topic);
+            }
+            else if (entity instanceof CValue) {
+                CValue v = (CValue)entity;
+                JSONObject value = new JSONObject();
+                value.put("name", v.getName());
+                value.put("value", v.getValue());
+                jsonValues.add(value);
+            }
         }
 
-        if (isRegistered(name)) {
-            throw new RuntimeException("Topic '" + name + "' is already registered");
-        }
+        jsonRoot.put("topics", jsonTopics);
+        jsonRoot.put("values", jsonValues);
 
-        QueriedTopic topic = new QueriedTopic(name, unit, supplier, attrs);
-        instance.getRegisteredEntities().add(topic);
-        instance.getTopics().add(topic);
+        return jsonRoot.toJSONString();
     }
 
-    public static void createTopic(String name, String unit, Supplier<Double> supplier, String... attrs) {
-        createTopicString(name, unit, () -> s_instance.get().d_doubleStringFunction.apply(supplier.get()), attrs);
+    // === INSTANCE LEVEL PROPERTIES ===
+    private boolean d_initialized = false;
+    private Writer d_writer = null;
+
+    private CSVWriter d_csvWriter = null;
+
+    /**
+     * List of all registered entities
+     */
+    private List<CEntity> d_entities;
+
+    /**
+     * Convenience data structure for quick lookup of registered entities
+     */
+    private Set<String> d_entitySet;
+
+    private List<CTopic> d_topics;
+    private Map<String, Optional<String>> d_publishedData;
+
+
+    // === INSTANCE LEVEL METHODS ===
+    private Chronicle(Writer writer) {
+        d_initialized = false;
+        d_writer = writer;
+        d_csvWriter = new CSVWriter(d_writer);
+
+        d_entities = new ArrayList<>();
+        d_entitySet = new HashSet<>();
+
+        d_topics = new ArrayList<>();
+        d_publishedData = new HashMap<>();
+
+        // Automatically add Time as a RegularTopic
+        addTopicLong("Time", "ms", () -> System.currentTimeMillis(), "xaxis");
     }
 
-    public static void createTopicSubscriber(String name, String unit, DataInferenceMode mode, String... attrs) {
-        Chronicle instance = s_instance.get();
-        if (instance.isInitialized()) {
-            throw new RuntimeException("Chronicle is already locked");
-        }
-        if (isRegistered(name)) {
-            throw new RuntimeException("Topic '" + name + "' is already registered");
-        }
-
-        instance.getPublishedData().put(name, Optional.empty());
-        SubscribedTopic topic = new SubscribedTopic(name, unit, mode, attrs);
-        instance.getRegisteredEntities().add(topic);
-        instance.getTopics().add(topic);
-
-    }
-
-    public static void createValue(String name, String value) {
-        Chronicle instance = s_instance.get();
-        if (instance.d_isInitialized) {
-            throw new RuntimeException("Chronicle is already locked");
-        }
-        if (isRegistered(name)) {
-            throw new RuntimeException("Topic '" + name + "' is already registered");
+    /**
+     * Complete initialization/set up of the Chronicle instance.
+     *
+     * Calling this method will freeze the field definitions for this Chronicle
+     * instance, and allow the instance to actually begin logging
+     */
+    public void finalize() {
+        // Throw an error if we have already been initialized
+        if (d_initialized) {
+            throw new InitializationException("Chronicle instance already finalized");
         }
 
-        instance.getRegisteredEntities().add(new Value(name, value));
-    }
+        d_initialized = true;
 
-    public static void publish(String name, String value) {
-        Chronicle instance = s_instance.get();
-        if (!instance.d_isInitialized) {
-            throw new RuntimeException("Chronicle not yet initialized");
-        }
-        instance.handlePublishedData(name, value);
-    }
+        String jsonHeaderBlock = generateJsonHeader(d_entities);
+        writeRawLine(jsonHeaderBlock);
 
-    public static void publish(String name, double value) {
-        publish(name, s_instance.get().d_doubleStringFunction.apply(value));
-    }
+        String[] topicNames = d_topics.stream()
+                                .map(CTopic::getName)
+                                .toArray(String[]::new);
 
-    public static void finalizeInitialization() {
-        Chronicle instance = s_instance.get();
-        if (instance.isInitialized()) {
-            throw new RuntimeException("Chronicle already initialized");
-        }
-
-        instance.setInitialized(true);
-
-        String jsonHeader = instance.generateJsonHeader();
-
-        StringJoiner joiner = new StringJoiner(",");
-        instance.d_topics.stream()
-            .map(Topic::getName)
-            .forEach((n) -> joiner.add(n));
-            String header = joiner.toString();
-
-        instance.writeLine(jsonHeader);
-        instance.writeLine(header);
-
+        d_csvWriter.writeNext(topicNames);
         try {
-            instance.getWriter().flush();
+            d_csvWriter.flush();
         }
         catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    // ===== Instance Methods =====
-    public boolean isInitialized() {
-        return d_isInitialized;
+    /**
+     * Add a registered topic that provides Strings to the Chronicle instance
+     * @param name
+     * @param unit
+     * @param supplier
+     * @param attrs
+     */
+    public void addTopicString(String name, String unit, Supplier<String> supplier, String... attrs) {
+        if (d_initialized) {
+            throw new InitializationException("Chronicle instance already initialized");
+        }
+
+        if (d_entitySet.contains(name)) {
+            throw new DuplicateIdentifierException();
+        }
+
+        RegularTopic topic = new RegularTopic(name, unit, supplier, attrs);
+        d_entities.add(topic);
+        d_entitySet.add(name);
+        d_topics.add(topic);
     }
 
-    public void setInitialized(boolean val) {
-        d_isInitialized = val;
+    /**
+     * Add a registered topic that provides Doubles to the Chronicle instance
+     * @param name
+     * @param unit
+     * @param supplier
+     * @param attrs
+     */
+    public void addTopicDouble(String name, String unit, Supplier<Double> supplier, String... attrs) {
+        addTopicString(name, unit, () -> s_doubleToString.apply(supplier.get()), attrs);
     }
 
-    public List<NamespaceEntity> getRegisteredEntities() {
-        return d_registeredEntities;
+    /**
+     * Add a registered topic that provides Longs to the Chronicle instance
+     * @param name
+     * @param unit
+     * @param supplier
+     * @param attrs
+     */
+    public void addTopicLong(String name, String unit, Supplier<Long> supplier, String... attrs) {
+        addTopicString(name, unit, () -> s_longToString.apply(supplier.get()), attrs);
     }
 
-    public List<Topic> getTopics() {
-        return d_topics;
+    /**
+     * Add a subscription to a topic
+     * @param name
+     * @param unit
+     * @param mode
+     * @param attrs
+     */
+    public void addTopicSubscription(String name, String unit, DataInferenceMode mode, String... attrs) {
+        if (d_initialized) {
+            throw new InitializationException("Chronicle instance already initialized");
+        }
+
+        if (d_entitySet.contains(name)) {
+            throw new DuplicateIdentifierException();
+        }
+
+        d_publishedData.put(name, Optional.empty());
+        SubscriptionTopic topic = new SubscriptionTopic(name, unit, mode, attrs);
+        d_entities.add(topic);
+        d_entitySet.add(name);
+        d_topics.add(topic);
     }
 
-    public Map<String, Optional<String>> getPublishedData() {
-        return d_publishedData;
+    /**
+     * Register a static value
+     * @param name
+     * @param value
+     */
+    public void addStaticValue(String name, String value) {
+        if (d_initialized) {
+            throw new InitializationException("Chronicle instance already initialized");
+        }
+
+        if (d_entitySet.contains(name)) {
+            throw new DuplicateIdentifierException();
+        }
+
+        d_entities.add(new CValue(name, value));
+        d_entitySet.add(name);
     }
 
-    private Writer getWriter() {
-        return d_writer;
-    }
-
-    public void updateTopics() {
-        if (!d_isInitialized) {
-            throw new RuntimeException("Chronicle is not initialized");
+    /**
+     * Run through all registered topics and update their values
+     */
+    public void update() {
+        if (!d_initialized) {
+            throw new InitializationException("Chronicle instance not fully initialized");
         }
 
         d_topics.stream()
-            .filter((o) -> o instanceof QueriedTopic)
-            .map((o) -> (QueriedTopic) o)
-            .forEach(QueriedTopic::refreshValue);
+            .filter((o) -> o instanceof RegularTopic)
+            .map((o) -> (RegularTopic) o)
+            .forEach(RegularTopic::refreshValue);
 
         d_topics.stream()
-            .filter((o) -> o instanceof SubscribedTopic)
-            .map((o) -> (SubscribedTopic) o)
-            .forEach((t) -> t.handlePublishedData(d_publishedData.get(t.getName())));
+            .filter((o) -> o instanceof SubscriptionTopic)
+            .map((o) -> (SubscriptionTopic) o)
+            .forEach((t) -> t.onPublishedData(d_publishedData.get(t.getName())));
 
+        // Erase the used published data
         d_publishedData.replaceAll((k, v) -> Optional.empty());
     }
 
+    /**
+     * Write a new line of data to the output
+     */
     public void log() {
-        if (!d_isInitialized) {
-            throw new RuntimeException("Chronicle is not initialized");
+        if (!d_initialized) {
+            throw new InitializationException("Chronicle instance not fully initialized");
         }
 
-        StringJoiner joiner = new StringJoiner(",");
-        d_topics.stream()
-            .map(Topic::getValue)
-            .map(Chronicle::escapeCommas)
-            .forEach((v) -> joiner.add(v));
+        String[] dataLine = d_topics.stream()
+                                .map(CTopic::getValue)
+                                .toArray(String[]::new);
 
-        String line = joiner.toString();
-
-        writeLine(line);
+        writeDataLine(dataLine);
     }
 
-    @SuppressWarnings("unchecked")
-    private String generateJsonHeader() {
-        JSONObject jsonRoot = new JSONObject();
-
-        JSONArray jsonTopics = new JSONArray();
-        for (Topic t : d_topics) {
-            JSONObject topic = new JSONObject();
-            topic.put("name", t.getName());
-            topic.put("unit", t.getUnit());
-            JSONArray attrs = new JSONArray();
-            Arrays.stream(t.getAttributes()).forEach((a) -> attrs.add(a));
-            topic.put("attrs", attrs);
-            jsonTopics.add(topic);
+    /**
+     * Publish a new value for a specified topic
+     * @param name
+     * @param value
+     */
+    public void publish(String name, String value) {
+        if (!d_initialized) {
+            throw new InitializationException("Chronicle instance not fully initialized");
         }
 
-        jsonRoot.put("topics", jsonTopics);
-
-        JSONArray jsonValues = new JSONArray();
-        d_registeredEntities.stream().filter((o) -> o instanceof Value).map((v) -> (Value) v).forEach((v) -> {
-            JSONObject value = new JSONObject();
-            value.put("name", v.getName());
-            value.put("value", v.getValue());
-            jsonValues.add(value);
-        });
-
-        jsonRoot.put("values", jsonValues);
-
-        return jsonRoot.toJSONString();
-    }
-
-    private static boolean isRegistered(String name) {
-        return s_instance.get().d_registeredEntities.stream().anyMatch((o) -> o.getName().equals(name));
-    }
-
-    private static String escapeCommas(String in) {
-        if (in.contains(",")) {
-            return "\"" + in + "\"";
-        }
-        return in;
-    }
-
-    private void handlePublishedData(String name, String value) {
         if (d_publishedData.get(name) == null) {
-            throw new NullPointerException();
+            throw new NullPointerException("Topic '" + name + "' not registered");
         }
+
 
         d_publishedData.put(name, Optional.of(value));
     }
 
-    private void writeLine(String line) {
+    private void writeRawLine(String line) {
         try {
             d_writer.write(line + System.lineSeparator());
             d_writer.flush();
+        }
+        catch (IOException e) {
+            e.printStackTrace();;
+        }
+    }
+
+    private void writeDataLine(String[] data) {
+        d_csvWriter.writeNext(data);
+        try {
+            d_csvWriter.flush();
         }
         catch (IOException e) {
             e.printStackTrace();

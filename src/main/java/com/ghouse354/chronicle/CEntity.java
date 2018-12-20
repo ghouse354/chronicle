@@ -1,5 +1,5 @@
 package com.ghouse354.chronicle;
 
-abstract class NamespaceEntity {
+abstract class CEntity {
     public abstract String getName();
 }
