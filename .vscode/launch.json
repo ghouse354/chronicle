@@ -4,7 +4,7 @@
             "type": "java",
             "name": "CodeLens (Launch) - ChronicleRunner",
             "request": "launch",
-            "mainClass": "com.ghouse354.chronicle2.ChronicleRunner",
+            "mainClass": "com.ghouse354.chronicle.ChronicleRunner",
             "projectName": "chronicle"
         }
     ]

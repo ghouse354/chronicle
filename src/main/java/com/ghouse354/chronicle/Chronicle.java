@@ -125,6 +125,7 @@ public class Chronicle {
     private List<CTopic> d_topics;
     private Map<String, Optional<String>> d_publishedData;
 
+    private long d_startTimeNs = System.nanoTime();
 
     // === INSTANCE LEVEL METHODS ===
     private Chronicle(Writer writer) {
@@ -139,7 +140,7 @@ public class Chronicle {
         d_publishedData = new HashMap<>();
 
         // Automatically add Time as a RegularTopic
-        addTopicLong("Time", "ms", () -> System.currentTimeMillis(), "xaxis");
+        addTopicDouble("Time", "s", () -> (double)((System.nanoTime() - d_startTimeNs) / 1_000_000_000d), "hide", "delta", "xaxis");
     }
 
     /**
