@@ -1,2 +1,2 @@
-# chronicle
-G-House Pirates Logging Framework
+# Chronicle
+A Data Logging Library

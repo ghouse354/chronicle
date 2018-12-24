@@ -28,6 +28,9 @@ public class Chronicle {
     private static Function<Double, String> s_doubleToString = (d) -> String.format("%.5g", d);
     private static Function<Long, String> s_longToString = (l) -> Long.toString(l);
 
+    private static Function<Double, Double> s_timestampSeconds = (diff) -> diff / 1_000_000_000d;
+    private static Function<Double, Double> s_timestampMilliseconds = (diff) -> diff / 1_000_000d;
+
     // === CLASS LEVEL METHODS ===
     /**
      * Create a new Chronicle instance with an identifier and an output writer
@@ -35,13 +38,13 @@ public class Chronicle {
      * @param writer Output writer to use for Chronicle output
      * @return Instance of Chronicle
      */
-    public static Chronicle create(String ident, Writer writer) {
+    public static Chronicle create(String ident, Writer writer, COptions options) {
         // Check if this identifier already exists
         if (s_instances.containsKey(ident)) {
             throw new DuplicateIdentifierException();
         }
 
-        Chronicle chronicle = new Chronicle(writer);
+        Chronicle chronicle = new Chronicle(writer, options);
         s_instances.put(ident, chronicle);
 
         return chronicle;
@@ -53,15 +56,23 @@ public class Chronicle {
      * @param path File name to save output to
      * @return Instance of Chronicle
      */
-    public static Chronicle create(String ident, String path) {
+    public static Chronicle create(String ident, String path, COptions options) {
         try {
             FileWriter fw = new FileWriter(path);
-            return create(ident, fw);
+            return create(ident, fw, options);
         }
         catch (IOException e) {
             e.printStackTrace();
             return null;
         }
+    }
+
+    public static Chronicle create(String ident, Writer writer) {
+        return create(ident, writer, new COptions());
+    }
+
+    public static Chronicle create(String ident, String path) {
+        return create(ident, path, new COptions());
     }
 
     /**
@@ -127,8 +138,12 @@ public class Chronicle {
 
     private long d_startTimeNs = System.nanoTime();
 
+    private COptions d_options;
+
+    private Function<Double, Double> d_timeConversionFunc;
+
     // === INSTANCE LEVEL METHODS ===
-    private Chronicle(Writer writer) {
+    private Chronicle(Writer writer, COptions options) {
         d_initialized = false;
         d_writer = writer;
         d_csvWriter = new CSVWriter(d_writer);
@@ -139,8 +154,22 @@ public class Chronicle {
         d_topics = new ArrayList<>();
         d_publishedData = new HashMap<>();
 
-        // Automatically add Time as a RegularTopic
-        addTopicDouble("Time", "s", () -> (double)((System.nanoTime() - d_startTimeNs) / 1_000_000_000d), "hide", "delta", "xaxis");
+        d_options = options;
+
+        String timeUnits;
+        if (d_options.timeGranularity == COptions.TimeGranularity.Seconds) {
+            d_timeConversionFunc = s_timestampSeconds;
+            timeUnits = "s";
+        }
+        else {
+            d_timeConversionFunc = s_timestampMilliseconds;
+            timeUnits = "ms";
+        }
+
+        // Add Time as a regular topic if the options say so
+        if (d_options.plotTime) {
+            addTopicDouble("Time", timeUnits, () -> d_timeConversionFunc.apply((double)(System.nanoTime() - d_startTimeNs)), "hide", "xaxis");
+        }
     }
 
     /**
